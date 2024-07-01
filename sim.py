@@ -57,6 +57,10 @@ class VPPSimulator():
         self.current_processing_count = 0
         # 记录当前已执行的step数
         self.current_step = 0
+        # 攒一批的最大tick等待时间
+        self.batch_due = 10
+        # 攒包的超时 deadline tick
+        self.batch_due_countdown = -1
         # trace模拟流量输入文件
         self.trace_file = open("trace.csv", "r")
         self.result_file = open(f"result_{self.batch_size}.csv", "w")
@@ -78,6 +82,9 @@ class VPPSimulator():
         pass
 
     def process_batch_packet(self, batch_size):
+        logging.debug(f"[process_batch_packet] current process batch size: [{batch_size}]")
+        # 清除当前攒批的倒计时
+        self.batch_due_countdown = -1
         packet_queue = self.packet_queue
         ipsec_count = 0
         l3_count = 0
@@ -98,7 +105,7 @@ class VPPSimulator():
         # 检查计算是否出错
         if end_tick <= self.current_tick:
             logging.error(f"[process_batch_packet] end_tick: [{end_tick}] is less than current_tick: [{self.current_tick}], packet_queue: {packet_queue}")
-        logging.debug(f"[process_batch_packet] ipsec: [{ipsec_count}], l3: [{l3_count}], clock cost: [{clock_cost}], end tick: [{end_tick}]")
+        logging.info(f"[process_batch_packet] ipsec: [{ipsec_count}], l3: [{l3_count}], clock cost: [{clock_cost}], end tick: [{end_tick}]")
         # 将这批packet的结束时间设置为end_tick
         for i in range(batch_size):
             packet_queue[i].end_tick = end_tick
@@ -123,9 +130,9 @@ class VPPSimulator():
 
     def dump_packet_queue(self):
         deque_str = ''.join([str(item) for item in self.packet_queue])
-        logging.info(f"--------------------")
-        logging.info(f"[dump_packet_queue] tick:[{self.current_tick}]")
-        logging.info(f"[dump_packet_queue] packet queue: {deque_str}")
+        logging.debug(f"--------------------")
+        logging.debug(f"[dump_packet_queue] tick:[{self.current_tick}]")
+        logging.debug(f"[dump_packet_queue] packet queue: {deque_str}")
 
     # 第一个tick初始化队列，将packet入队，并计算结束时间
     def init_packet_queue(self):
@@ -146,7 +153,7 @@ class VPPSimulator():
         self.dump_packet_queue()
 
     def run_one_tick(self) -> PacketCount:
-        logging.debug(f"+------------------Current tick: {self.current_tick}------------------+")
+        logging.info(f"+------------------Current tick: {self.current_tick}------------------+")
         packet_queue : collections.deque[Packet] = self.packet_queue
         # -- 1. 生成当前tick的包 --
         # 将当前tick到的包加入队列右端
@@ -190,21 +197,39 @@ class VPPSimulator():
                     l3_packet_current_tick += 1
             total_packet_current_tick = self.current_processing_count
             avg_latency = total_latency_current_tick / total_packet_current_tick
-            logging.debug(f"[run_one_tick] finish pop packets, avg latency: [{avg_latency}]")
+            logging.info(f"[run_one_tick] finish pop packets, avg latency: [{avg_latency}]")
             # 当前批次packet处理完毕，开始进行下一批packet的处理
             if len(packet_queue) >= self.batch_size:
                 self.process_batch_packet(batch_size=self.batch_size)
             else:
-                self.process_batch_packet(batch_size=len(packet_queue))
+                # -- 3.如果当前队列中的packet数量不足一个batch，等待下一个tick--
+                # 初始化情况，设置batch_due_countdown
+                if self.batch_due_countdown == -1:
+                    self.batch_due_countdown = self.batch_due
+                elif self.batch_due_countdown == 0:
+                    self.process_batch_packet(batch_size=len(packet_queue))
+                    logging.info(f"[run_one_tick] batch due countdown is 0, process batch packet..")
+                else:
+                    logging.info(f"[run_one_tick] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]")
+                    self.batch_due_countdown -= 1
         # 如果当前队头的packet的结束时间未设置，说明当这批packet需要在当前tick处理
         elif first_packet.end_tick == -1:
             if len(packet_queue) >= self.batch_size:
                 self.process_batch_packet(batch_size=self.batch_size)
             else:
-                self.process_batch_packet(batch_size=len(packet_queue))
+                # -- 3.如果当前队列中的packet数量不足一个batch，等待下一个tick--
+                # 初始化情况，设置batch_due_countdown
+                if self.batch_due_countdown == -1:
+                    self.batch_due_countdown = self.batch_due
+                elif self.batch_due_countdown == 0:
+                    self.process_batch_packet(batch_size=len(packet_queue))
+                    logging.info(f"[run_one_tick] batch due countdown is 0, process batch packet..")
+                else:
+                    logging.info(f"[run_one_tick] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]")
+                    self.batch_due_countdown -= 1
         # 如果当前队头的packet的结束时间未到达，继续等待其处理结束
         elif first_packet.end_tick < self.current_tick:
-            logging.error(f"[run_one_tick] current tick: [{self.current_tick}] is greater than first packet's end tick: [{first_packet.end_tick}]")
+            logging.debug(f"[run_one_tick] current tick: [{self.current_tick}] is greater than first packet's end tick: [{first_packet.end_tick}]")
             exit(1)
         # 当前队头的packet的处理结束时间未到达，继续等待
         else:
