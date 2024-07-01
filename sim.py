@@ -56,10 +56,10 @@ class VPPSimulator():
         # 当前未处理完的包数量
         self.current_processing_count = 0
         # 记录当前已执行的step数
-        self.taken_steps = 0
+        self.current_step = 0
         # trace模拟流量输入文件
         self.trace_file = open("trace.csv", "r")
-        self.result_file = open("result.csv", "w")
+        self.result_file = open(f"result_{self.batch_size}.csv", "w")
         self.trace_reader  = csv.reader(self.trace_file)
         self.read_from_file = True
         # 每种node的运行时间配置
@@ -148,13 +148,24 @@ class VPPSimulator():
     def run_one_tick(self) -> PacketCount:
         logging.debug(f"+------------------Current tick: {self.current_tick}------------------+")
         packet_queue : collections.deque[Packet] = self.packet_queue
+        # -- 1. 生成当前tick的包 --
+        # 将当前tick到的包加入队列右端
+        incomingPacket : IncomingPacket = self.get_incoming_packet()
+        ipsec_packet_number : int = incomingPacket.ipsec_count
+        l3_packet_number : int = incomingPacket.l3_count
+        for i in range(incomingPacket.total_count):
+            if i < ipsec_packet_number:
+                packet_queue.append(Packet(type = "ipsec",enqueue_tick=self.current_tick))
+            else:
+                packet_queue.append(Packet(type = "l3",enqueue_tick=self.current_tick))
+        logging.debug(f"[run_one_tick] push packets ipsec:[{ipsec_packet_number}], l3: [{l3_packet_number}]")
         # 如果当前队列中没有包，直接跳过
         if len(packet_queue) == 0:
             logging.debug(f"[run_one_tick] nothing to do")
             self.current_tick += 1
             self.dump_packet_queue()
             return PacketCount(0, 0, 0, 0)
-        # -- 1. 处理当前tick的包 --
+        # -- 2. 处理当前tick的包 --
         # 记录当前tick的包的数量和延迟
         total_packet_current_tick = 0
         total_latency_current_tick = 0
@@ -162,11 +173,11 @@ class VPPSimulator():
         l3_packet_current_tick = 0
         ipsec_latency_current_tick = 0
         ipsec_packet_current_tick = 0
-        logging.info(f"[run_one_tick] first packet: {first_packet}")
         # 获取队列左端的第一个packet
         first_packet: Packet = packet_queue[0]
+        logging.info(f"[run_one_tick] first packet: {first_packet}")
         # 如果当前正在处理的这批packet的结束时间已到达，将这批packet出队，并计算延迟
-        if first_packet.end_tick <= self.current_tick:
+        if first_packet.end_tick == self.current_tick:
             for i in range(self.current_processing_count):
                 packet : Packet = packet_queue.popleft()
                 total_latency_current_tick += (packet.end_tick - packet.enqueue_tick)
@@ -185,21 +196,20 @@ class VPPSimulator():
                 self.process_batch_packet(batch_size=self.batch_size)
             else:
                 self.process_batch_packet(batch_size=len(packet_queue))
+        # 如果当前队头的packet的结束时间未设置，说明当这批packet需要在当前tick处理
+        elif first_packet.end_tick == -1:
+            if len(packet_queue) >= self.batch_size:
+                self.process_batch_packet(batch_size=self.batch_size)
+            else:
+                self.process_batch_packet(batch_size=len(packet_queue))
         # 如果当前队头的packet的结束时间未到达，继续等待其处理结束
+        elif first_packet.end_tick < self.current_tick:
+            logging.error(f"[run_one_tick] current tick: [{self.current_tick}] is greater than first packet's end tick: [{first_packet.end_tick}]")
+            exit(1)
+        # 当前队头的packet的处理结束时间未到达，继续等待
         else:
             logging.debug(f"[run_one_tick] nothing to do")
-            
-        # -- 2. 生成当前tick的包 --
-        # 将当前tick到的包加入队列右端
-        incomingPacket : IncomingPacket = self.get_incoming_packet()
-        ipsec_packet_number : int = incomingPacket.ipsec_count
-        l3_packet_number : int = incomingPacket.l3_count
-        for i in range(incomingPacket.total_count):
-            if i < ipsec_packet_number:
-                packet_queue.append(Packet(type = "ipsec",enqueue_tick=self.current_tick))
-            else:
-                packet_queue.append(Packet(type = "l3",enqueue_tick=self.current_tick))
-        logging.debug(f"[run_one_tick] push packets ipsec:[{ipsec_packet_number}], l3: [{l3_packet_number}]")
+
         # 本轮处理结束，tick增加
         self.current_tick += 1
         self.dump_packet_queue()
@@ -217,25 +227,25 @@ class VPPSimulator():
             packet_count_current_step.l3_latency += pakcket_count_current_tick.l3_latency
             packet_count_current_step.ipsec_count += pakcket_count_current_tick.ipsec_count
             packet_count_current_step.ipsec_latency += pakcket_count_current_tick.ipsec_latency
-        self.taken_steps += 1
+        self.current_step += 1
         avg_latency = 0 if packet_count_current_step.total_count == 0 else packet_count_current_step.total_latency / packet_count_current_step.total_count
         l3_latency = 0 if packet_count_current_step.l3_count == 0 else packet_count_current_step.l3_latency / packet_count_current_step.l3_count
         ipsec_latency = 0 if packet_count_current_step.ipsec_count == 0 else packet_count_current_step.ipsec_latency / packet_count_current_step.ipsec_count
         result : Result = Result(total_packet=packet_count_current_step.total_count, avg_latency=avg_latency, ipsec_latency=ipsec_latency, l3_latency=l3_latency)
-        self.result_file.write(f"{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n")
+        self.result_file.write(f"{self.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n")
         return result
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.ERROR)
     vpp = VPPSimulator()
     logging.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
     vpp.init_packet_queue()
     # 写csv header
-    vpp.result_file.write("total_packet,avg_latency,ipsec_latency,l3_latency\n")
+    vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
     for i in range(30):
         result :Result = vpp.step()
-        logging.info(f"Step: [{vpp.taken_steps}], total packet in 500 tick: [{result.total_packet}], avg latency: [{result.avg_latency}, ipsec latency: [{result.ipsec_latency}], l3 latency: [{result.l3_latency}]")
+        logging.info(f"Step: [{vpp.current_step}], total packet in 500 tick: [{result.total_packet}], avg latency: [{result.avg_latency}, ipsec latency: [{result.ipsec_latency}], l3 latency: [{result.l3_latency}]")
 
     # while not vpp.done:
     #     vpp.step()

@@ -5,7 +5,7 @@ import random
 file_path = 'trace.csv'
 
 # Define the number of rows to generate
-num_rows = 1000
+num_rows = 300000
 
 # Open the file in write mode
 with open(file_path, 'w', newline='') as file:
@@ -17,7 +17,7 @@ with open(file_path, 'w', newline='') as file:
 
     # Generate random values and write them to the file
     for i in range(num_rows):
-        packet_num = random.randint(0, 512)
+        packet_num = random.randint(0, 5)
         ratio = random.uniform(0, 1)
         writer.writerow([packet_num, ratio])
 
