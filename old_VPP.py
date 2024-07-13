@@ -140,6 +140,7 @@ class VPPSimulatorEnv(gym.Env):
         self.done = False
         # packet缓存队列
         self.packet_queue: collections.deque[Packet] = collections.deque()
+        # self.init_packet_queue()
 
         # TODO: Uncomment the following line after upgrading to Gymnasium
         # return self._get_obs(), {}
@@ -435,11 +436,12 @@ class VPPSimulatorEnv(gym.Env):
 if __name__ == "__main__":
     vpp = VPPSimulatorEnv()
     logger.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
-    vpp.init_packet_queue()
+    # vpp.init_packet_queue()
+    vpp.reset()
     # 写csv header
     start_time = time.time()
     vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
-    for i in range(600):
+    for i in range(100):
         if i % 300 == 0:
             vpp.reset()
         res = vpp.step(vpp.batch_size)
