@@ -22,15 +22,10 @@ with open(file_path, 'w', newline='') as file:
     # Write the header row
     writer.writerow(['Packet Number', 'IPSec Ratio'])
 
-    # Generate random values and write them to the file
-    # for i in range(num_rows):
-    #     packet_num = random.randint(0, 5)
-    #     ratio = random.uniform(0, 1)
-    #     writer.writerow([packet_num, ratio])
-    
+    # 一次循环生成100个step的数据，一共生成300个step的数据
     for period in range(1, 3):
-        # 每段一万行（tick），20step
-        # 第一段，高流量
+        # 每段一万行（tick），20step，共五段
+        # 第一段，高流量，64 batch_size不会积压，32 batch_size会积压
         for i in range(num_rows):
             packet_num = random.randint(5, 12)
             packet_num = approximate_multiple(packet_num, packet_obj_scaling)
@@ -45,13 +40,13 @@ with open(file_path, 'w', newline='') as file:
             packet_num = approximate_multiple(packet_num, packet_obj_scaling)
             ratio = random.uniform(0, 1)
             writer.writerow([packet_num, ratio])
-        # 第三段，burst高流量
+        # 第三段，burst高流量，64 batch_size不会积压，32 batch_size会积压
         for i in range(num_rows):
             packet_num = random.randint(0, 3)
             packet_num = approximate_multiple(packet_num, packet_obj_scaling)
             ratio = random.uniform(0, 1)
             if i % 8 == 0:
-                packet_num = random.randint(20,30)
+                packet_num = random.randint(50,60)
                 packet_num = approximate_multiple(packet_num, packet_obj_scaling)
                 ratio = random.uniform(0, 1)
             writer.writerow([packet_num, ratio])
