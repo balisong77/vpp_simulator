@@ -2,7 +2,7 @@ import csv
 import random
 
 # Define the file path
-file_path = 'trace_burst.csv'
+file_path = 'trace.csv'
 
 # Define the number of rows to generate
 num_rows = 10000
@@ -28,7 +28,7 @@ with open(file_path, 'w', newline='') as file:
     #     ratio = random.uniform(0, 1)
     #     writer.writerow([packet_num, ratio])
     
-    for period in range(1, 5):
+    for period in range(1, 3):
         # 每段一万行（tick），20step
         # 第一段，高流量
         for i in range(num_rows):
@@ -58,6 +58,12 @@ with open(file_path, 'w', newline='') as file:
         # 第四段，低流量
         for i in range(num_rows):
             packet_num = random.randint(0, 4)
+            packet_num = approximate_multiple(packet_num, packet_obj_scaling)
+            ratio = random.uniform(0, 1)
+            writer.writerow([packet_num, ratio])
+        # 第五段，中等流量
+        for i in range(num_rows):
+            packet_num = random.randint(4, 8)
             packet_num = approximate_multiple(packet_num, packet_obj_scaling)
             ratio = random.uniform(0, 1)
             writer.writerow([packet_num, ratio])

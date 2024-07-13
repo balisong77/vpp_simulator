@@ -11,7 +11,7 @@ from gym import spaces
 from gym.core import ActType, ObsType
 
 # 模拟中一个Packet对象等于实际的多少个包（为了优化模拟速度引入）
-packet_obj_scaling = 2
+packet_obj_scaling = 1
 logger = logging.getLogger(__name__)
 handler = logging.FileHandler(f"vpp_{packet_obj_scaling}.log", "w")
 logger.addHandler(handler)
@@ -104,12 +104,14 @@ class VPPSimulatorEnv(gym.Env):
         self.batch_due = 30
         # 攒包的超时 deadline tick
         self.batch_due_countdown = -1
-        # trace模拟流量输入文件
-        self.trace_file = open("./trace_burst.csv", "r")
+        # trace模拟流量输入文件，每一行为：当前tick的包的数量，当前不同IPSec流量比例(剩下的是L3)
+        self.trace_lines = open("./trace.csv", "r").readlines()[1:]
+        self.trace_line_index = 0
+        # debug step过程的结果输出文件
         self.result_file = open(
-            f"result_burst_{self.batch_size}_{self.packet_obj_scaling}.csv", "w"
+            f"result_{self.batch_size}_{self.packet_obj_scaling}.csv", "w"
         )
-        self.trace_reader = csv.reader(self.trace_file)
+        # 是否从文件中读取trace，或者通过代码配置
         self.read_from_file = True
         # 每种node的运行时间配置
         self.nodes: Dict[str, Node] = {
@@ -128,19 +130,15 @@ class VPPSimulatorEnv(gym.Env):
         self.done = False
         # packet缓存队列
         self.packet_queue: collections.deque[Packet] = collections.deque()
-        next(self.trace_reader)
         # 状态空间
         self.observation_space = spaces.Box(
-            low=np.array([0, 0]),
-            high=np.array([10000, 10000]),
-            shape=(2,),
+            low=np.array([0, 0, 0]),
+            high=np.array([10000, 10000, 10000]),
+            shape=(3,),
             dtype=np.int32,
         )
         # 动作空间
         self.action_space = spaces.Discrete(2)
-
-    def __del__(self):
-        self.trace_file.close()
 
     def reset(self):
         # 全局时钟变量
@@ -158,7 +156,7 @@ class VPPSimulatorEnv(gym.Env):
 
         # TODO: Uncomment the following line after upgrading to Gymnasium
         # return self._get_obs(), {}
-        return self._get_obs()
+        return self._get_obs(result=Result(0, 0, 0, 0))
 
     # 这里的packet_count是当前队列中的packet数量，真正处理了多少包，需要再乘self.packet_obj_scaling
     def process_batch_packet(self, packet_count):
@@ -212,10 +210,8 @@ class VPPSimulatorEnv(gym.Env):
     def get_incoming_packet(self) -> IncomingPacket:
         # 从trace文件中获取当前tick的包的数量，和当前的ipsec比例
         if self.read_from_file:
-            line = next(self.trace_reader, None)
-            if line is None:
-                self.done = True
-                return
+            line = self.trace_lines[self.trace_line_index].strip().split(",")
+            self.trace_line_index = (self.trace_line_index + 1) % len(self.trace_lines)
             total_packet_nums: int = int(line[0])
             ipsec_ratio: float = float(line[1])
         # 或通过代码配置获取
@@ -269,7 +265,7 @@ class VPPSimulatorEnv(gym.Env):
         self.dump_packet_queue()
 
     def run_one_tick(self) -> PacketCount:
-        logger.info(
+        logger.debug(
             f"+------------------Current tick: {self.current_tick}------------------+"
         )
         packet_queue: collections.deque[Packet] = self.packet_queue
@@ -315,7 +311,7 @@ class VPPSimulatorEnv(gym.Env):
         ipsec_packet_current_tick = 0
         # 获取队列左端的第一个packet
         first_packet: Packet = packet_queue[0]
-        logger.info(f"[run_one_tick] first packet: {first_packet}")
+        logger.debug(f"[run_one_tick] first packet: {first_packet}")
         # 如果当前正在处理的这批packet的结束时间已到达，或当前队头的packet的结束时间未设置，将这批packet出队，并计算延迟
         if first_packet.end_tick == self.current_tick or first_packet.end_tick == -1:
             # end_tick == -1是第一次init_queue的情况，此时不需要出队
@@ -338,7 +334,7 @@ class VPPSimulatorEnv(gym.Env):
                         l3_packet_current_tick += self.packet_obj_scaling
                 total_packet_current_tick = self.current_processing_count
                 avg_latency = total_latency_current_tick / total_packet_current_tick
-                logger.info(
+                logger.debug(
                     f"[run_one_tick] finish pop packets, avg latency: [{avg_latency}]"
                 )
             # 当前批次packet处理（出队）完毕，开始进行下一批packet的处理（计算处理结束时间）
@@ -350,11 +346,12 @@ class VPPSimulatorEnv(gym.Env):
                 if self.batch_due_countdown == -1:
                     self.batch_due_countdown = self.batch_due
                 elif self.batch_due_countdown == 0:
-                    logger.info(
+                    self.process_batch_packet(packet_count=len(packet_queue))
+                    logger.debug(
                         f"[run_one_tick] batch due countdown is 0, process batch packet.."
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         f"[run_one_tick] queue len: [{len(packet_queue)}] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]"
                     )
                     self.batch_due_countdown -= 1
@@ -445,11 +442,20 @@ class VPPSimulatorEnv(gym.Env):
             ipsec_latency=ipsec_latency,
             l3_latency=l3_latency,
         )
-        # self.result_file.write(f"{self.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n")
+
+        # 打印每一步的结果
+        self.result_file.write(
+            f"{self.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n"
+        )
 
         # TODO: Uncomment the following line after upgrading to Gymnasium
         # return self._get_obs(), result.get_reward(), False, False, {}
-        return result, result.get_reward(), False, {}
+        return (
+            self._get_obs(result=result),
+            result.get_reward(),
+            self.current_step >= 300,
+            {},
+        )
 
     def render(self):
         pass
@@ -457,8 +463,17 @@ class VPPSimulatorEnv(gym.Env):
     def close(self):
         super().close()
 
-    def _get_obs(self):
-        return {"queue_length": len(self.packet_queue)}
+    def _get_obs(self, result: Result) -> ObsType:
+        return np.array(
+            [len(self.packet_queue), result.total_packet, result.avg_latency]
+        )
+        # return {
+        #     "queue_length": len(self.packet_queue),
+        #     "total_packet": result.total_packet,
+        #     "avg_latency": result.avg_latency,
+        #     "ipsec_latency": result.ipsec_latency,
+        #     "l3_latency": result.l3_latency,
+        # }
 
 
 # register(
@@ -467,25 +482,21 @@ class VPPSimulatorEnv(gym.Env):
 #     max_episode_steps=300,
 # )
 
-# if __name__ == "__main__":
-#     vpp = VPPSimulatorEnv()
-#     logger.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
-#     vpp.init_packet_queue()
-#     # 写csv header
-#     vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
-#     start_time = time.time()
-#     for i in range(30):
-#         res = vpp.step(vpp.batch_size)
-#         result: Result = res[0]
-#         logger.info(
-#             f"Step: [{vpp.current_step}], total packet in 500 tick: [{result.total_packet}], avg latency: [{result.avg_latency}, ipsec latency: [{result.ipsec_latency}], l3 latency: [{result.l3_latency}]"
-#         )
-#         vpp.result_file.write(
-#             f"{vpp.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n"
-#         )
-#     end_time = time.time()
-#     execution_time = end_time - start_time
-#     print(f"Simulator executed in {execution_time} seconds")
+if __name__ == "__main__":
+    vpp = VPPSimulatorEnv()
+    logger.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
+    logger.debug(f"Current packet_obj_per_batch: {vpp.packet_obj_per_batch}")
+    vpp.init_packet_queue()
+    # 写csv header
+    vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
+    start_time = time.time()
+    for i in range(600):
+        if i % 300 == 0:
+            vpp.reset()
+        res = vpp.step(vpp.batch_size)
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Simulator executed in {execution_time} seconds")
 
 # while not vpp.done:
 #     vpp.step()

@@ -1,8 +1,8 @@
 import collections
-import csv
 import logging
 import math
 from typing import Any, Dict, SupportsFloat, Tuple
+import time
 
 import gym
 import numpy as np
@@ -10,6 +10,9 @@ from gym import spaces
 from gym.core import ActType, ObsType
 
 logger = logging.getLogger(__name__)
+handler = logging.FileHandler(f"vpp_old.log", "w")
+logger.addHandler(handler)
+logger.setLevel(logging.ERROR)
 
 
 class Node:
@@ -92,10 +95,10 @@ class VPPSimulatorEnv(gym.Env):
         self.batch_due = 30
         # 攒包的超时 deadline tick
         self.batch_due_countdown = -1
-        # trace模拟流量输入文件
-        self.trace_file = open("./trace_burst.csv", "r")
-        self.result_file = open(f"result_burst_{self.batch_size}.csv", "w")
-        self.trace_reader = csv.reader(self.trace_file)
+        # trace模拟流量输入文件，每一行为：当前tick的包的数量，当前不同IPSec流量比例(剩下的是L3)
+        self.trace_lines = open("./trace.csv", "r").readlines()[1:]
+        self.trace_line_index = 0
+        self.result_file = open(f"result_old_{self.batch_size}.csv", "w")
         self.read_from_file = True
         # 每种node的运行时间配置
         self.nodes: Dict[str, Node] = {
@@ -114,7 +117,6 @@ class VPPSimulatorEnv(gym.Env):
         self.done = False
         # packet缓存队列
         self.packet_queue: collections.deque[Packet] = collections.deque()
-        next(self.trace_reader)
         # 状态空间
         self.observation_space = spaces.Box(
             low=np.array([0, 0]),
@@ -124,9 +126,6 @@ class VPPSimulatorEnv(gym.Env):
         )
         # 动作空间
         self.action_space = spaces.Discrete(2)
-
-    def __del__(self):
-        self.trace_file.close()
 
     def reset(self):
         # 全局时钟变量
@@ -189,17 +188,15 @@ class VPPSimulatorEnv(gym.Env):
     def get_incoming_packet(self) -> IncomingPacket:
         # 从trace文件中获取当前tick的包的数量，和当前的ipsec比例
         if self.read_from_file:
-            line = next(self.trace_reader, None)
-            if line is None:
-                self.done = True
-                return
+            line = self.trace_lines[self.trace_line_index].strip().split(",")
+            self.trace_line_index = (self.trace_line_index + 1) % len(self.trace_lines)
             total_packet_nums: int = int(line[0])
             ipsec_ratio: float = float(line[1])
         # 或通过代码配置获取
         else:
             total_packet_nums = self.packet_per_tick
             ipsec_ratio = self.ipsec_packet_ratio
-        ipsec_packet_number: int = math.ceil(total_packet_nums * ipsec_ratio)
+        ipsec_packet_number: int = round(total_packet_nums * ipsec_ratio)
         l3_packet_number: int = total_packet_nums - ipsec_packet_number
         return IncomingPacket(total_packet_nums, ipsec_packet_number, l3_packet_number)
 
@@ -251,7 +248,9 @@ class VPPSimulatorEnv(gym.Env):
         )
         # 如果当前队列中没有包，直接跳过
         if len(packet_queue) == 0:
-            logger.debug(f"[run_one_tick] nothing to do")
+            logger.debug(
+                f"[run_one_tick] queue length: {len(packet_queue)} nothing to do"
+            )
             self.current_tick += 1
             self.dump_packet_queue()
             return PacketCount(0, 0, 0, 0, incoming_packet)
@@ -298,7 +297,7 @@ class VPPSimulatorEnv(gym.Env):
                     )
                 else:
                     logger.info(
-                        f"[run_one_tick] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]"
+                        f"[run_one_tick] queue len: [{len(packet_queue)}] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]"
                     )
                     self.batch_due_countdown -= 1
         # 如果当前队头的packet的结束时间未设置，说明当这批packet需要在当前tick处理
@@ -317,7 +316,7 @@ class VPPSimulatorEnv(gym.Env):
                     )
                 else:
                     logger.info(
-                        f"[run_one_tick] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]"
+                        f"[run_one_tick] queue len: [{len(packet_queue)}] waitting for batch.. batch due countdown: [{self.batch_due_countdown}]"
                     )
                     self.batch_due_countdown -= 1
         # 如果当前队头的packet的结束时间未到达，继续等待其处理结束
@@ -328,7 +327,9 @@ class VPPSimulatorEnv(gym.Env):
             exit(1)
         # 当前队头的packet的处理结束时间未到达，继续等待
         else:
-            logger.debug(f"[run_one_tick] nothing to do")
+            logger.debug(
+                f"[run_one_tick] queue length: {len(packet_queue)} nothing to do"
+            )
 
         # 本轮处理结束，tick增加
         self.current_tick += 1
@@ -405,11 +406,15 @@ class VPPSimulatorEnv(gym.Env):
             ipsec_latency=ipsec_latency,
             l3_latency=l3_latency,
         )
-        # self.result_file.write(f"{self.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n")
+
+        # 打印每一步的结果
+        self.result_file.write(
+            f"{self.current_step},{result.total_packet},{result.avg_latency},{result.ipsec_latency},{result.l3_latency}\n"
+        )
 
         # TODO: Uncomment the following line after upgrading to Gymnasium
         # return self._get_obs(), result.get_reward(), False, False, {}
-        return self._get_obs(), result.get_reward(), False, {}
+        return result, result.get_reward(), False, {}
 
     def render(self):
         pass
@@ -427,17 +432,19 @@ class VPPSimulatorEnv(gym.Env):
 #     max_episode_steps=300,
 # )
 
-# if __name__ == "__main__":
-#     logger.basicConfig(level=logger.ERROR)
-#     vpp = VPPSimulatorEnv()
-#     logger.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
-#     vpp.init_packet_queue()
-#     # 写csv header
-#     vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
-#     for i in range(30):
-#         result: Result = vpp.step()
-#         logger.info(
-#             f"Step: [{vpp.current_step}], total packet in 500 tick: [{result.total_packet}], avg latency: [{result.avg_latency}, ipsec latency: [{result.ipsec_latency}], l3 latency: [{result.l3_latency}]")
-#
-#     # while not vpp.done:
-#     #     vpp.step()
+if __name__ == "__main__":
+    vpp = VPPSimulatorEnv()
+    logger.debug(f"Current batchsize: {vpp.batch_size}, Start simulation...")
+    vpp.init_packet_queue()
+    # 写csv header
+    start_time = time.time()
+    vpp.result_file.write("step,total_packet,avg_latency,ipsec_latency,l3_latency\n")
+    for i in range(600):
+        if i % 300 == 0:
+            vpp.reset()
+        res = vpp.step(vpp.batch_size)
+        result: Result = res[0]
+    end_time = time.time()
+    print(f"Time cost: {end_time - start_time}")
+    # while not vpp.done:
+    #     vpp.step()
